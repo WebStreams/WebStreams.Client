@@ -8,8 +8,8 @@
     <ProjectGuid>{36178528-3C1D-498A-B1AE-F9160C37800A}</ProjectGuid>
     <OutputType>Library</OutputType>
     <AppDesignerFolder>Properties</AppDesignerFolder>
-    <RootNamespace>WebStream.Client</RootNamespace>
-    <AssemblyName>WebStream.Client</AssemblyName>
+    <RootNamespace>Dapr.WebStreams.Client</RootNamespace>
+    <AssemblyName>Dapr.WebStreams.Client</AssemblyName>
     <DefaultLanguage>en-US</DefaultLanguage>
     <FileAlignment>512</FileAlignment>
     <ProjectTypeGuids>{786C830F-07A1-408B-BD7F-6EE04809D6DB};{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}</ProjectTypeGuids>
@@ -22,7 +22,7 @@
     <DebugSymbols>true</DebugSymbols>
     <DebugType>full</DebugType>
     <Optimize>false</Optimize>
-    <OutputPath>..\lib\Portable-Net45+Win8+WP8+MonoAndroid+MonoTouch\</OutputPath>
+    <OutputPath>lib\Portable-Net45+Win8+WP8+WPA81+MonoAndroid+MonoTouch\</OutputPath>
     <DefineConstants>DEBUG;TRACE</DefineConstants>
     <ErrorReport>prompt</ErrorReport>
     <WarningLevel>4</WarningLevel>
@@ -44,7 +44,7 @@
   </ItemGroup>
   <ItemGroup>
     <Reference Include="Dapr.WebSockets">
-      <HintPath>..\packages\Dapr.WebSockets.0.1.0\lib\Portable-Net45+SL50+Win8+WP8+WPA81+MonoAndroid+MonoTouch\Dapr.WebSockets.dll</HintPath>
+      <HintPath>..\packages\Dapr.WebSockets.0.1.11\lib\Portable-Net45+Win8+WP8+WPA81+MonoAndroid+MonoTouch\Dapr.WebSockets.dll</HintPath>
     </Reference>
     <Reference Include="Newtonsoft.Json">
       <HintPath>..\packages\Newtonsoft.Json.6.0.3\lib\portable-net45+wp80+win8+wpa81\Newtonsoft.Json.dll</HintPath>
@@ -61,9 +61,13 @@
     <Reference Include="System.Reactive.PlatformServices">
       <HintPath>..\packages\Rx-PlatformServices.2.2.4\lib\portable-windows8+net45+wp8\System.Reactive.PlatformServices.dll</HintPath>
     </Reference>
+    <Reference Include="System.Threading.Tasks.Dataflow">
+      <HintPath>..\packages\Microsoft.Tpl.Dataflow.4.5.20\lib\portable-net45+win8+wp8+wpa81\System.Threading.Tasks.Dataflow.dll</HintPath>
+    </Reference>
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />
+    <None Include="WebStream.Client.nuspec" />
   </ItemGroup>
   <Import Project="$(MSBuildExtensionsPath32)\Microsoft\Portable\$(TargetFrameworkVersion)\Microsoft.Portable.CSharp.targets" />
   <Import Project="$(SolutionDir)\.nuget\NuGet.targets" Condition="Exists('$(SolutionDir)\.nuget\NuGet.targets')" />
