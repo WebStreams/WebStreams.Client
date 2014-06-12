@@ -7,8 +7,6 @@ namespace Dapr.WebStreams.Client
 {
     using System;
     using System.Collections.Generic;
-    using System.Diagnostics;
-    using System.Linq;
     using System.Reactive.Disposables;
     using System.Reactive.Linq;
     using System.Reactive.Threading.Tasks;
@@ -51,20 +49,9 @@ namespace Dapr.WebStreams.Client
                 observer =>
                 {
                     var cancellation = new CancellationTokenSource();
-                    var subscription = new IDisposable[] { null };
-                    Action dispose = () =>
-                    {
-                        if (subscription[0] != null)
-                        {
-                            subscription[0].Dispose();
-                        }
-
-                        cancellation.Dispose();
-                    };
-
                     var socket = WebSocket.ConnectOutput(uri, cancellation.Token).ToObservable().Merge();
-                    subscription[0] = SubscribeToSocket(socket, observer, dispose, serializerSettings);
-                    return Disposable.Create(dispose);
+                    SubscribeToSocket(socket, observer, cancellation, serializerSettings);
+                    return Disposable.Create(cancellation.Cancel);
                 });
         }
 
@@ -94,39 +81,29 @@ namespace Dapr.WebStreams.Client
                 observer =>
                 {
                     var cancellation = new CancellationTokenSource();
-                    var subscriptions = new List<IDisposable>(inputStreams.Count);
-
-                    // Connect to the WebSocket and pipe all input streams into it.
-                    var socket =
-                        WebSocket.Connect(uri, cancellation.Token)
-                            .ToObservable()
-                            .Do(
-                                sock =>
-                                {
-                                    subscriptions.AddRange(inputStreams.Select(kvp => PipeToObserver(sock, kvp.Value, kvp.Key, serializerSettings)));
-                                })
-                            .Merge();
-
-                    // Set up the dispose method, which will unwind everything.
-                    var subscription = new IDisposable[] { null };
-                    Action dispose = () =>
+                    try
                     {
-                        if (subscription[0] != null)
-                        {
-                            subscription[0].Dispose();
-                        }
+                        // Connect to the WebSocket and pipe all input streams into it.
+                        var socket = WebSocket.Connect(uri, cancellation.Token).ToObservable().Do(
+                            sock =>
+                            {
+                                foreach (var input in inputStreams)
+                                {
+                                    PipeToObserver(sock, input.Value, input.Key, cancellation.Token, serializerSettings);
+                                }
+                            }).Merge();
 
-                        foreach (var sub in subscriptions)
-                        {
-                            sub.Dispose();
-                        }
+                        // Subscribe the socket to the observer.
+                        SubscribeToSocket(socket, observer, cancellation, serializerSettings);
+                    }
+                    catch (Exception e)
+                    {
+                        observer.OnError(e);
+                        cancellation.Cancel();
+                    }
 
-                        cancellation.Dispose();
-                    };
-
-                    // Subscribe the socket to the observer.
-                    subscription[0] = SubscribeToSocket(socket, observer, dispose, serializerSettings);
-                    return Disposable.Create(dispose);
+                    // Return a disposable which will unwind everything.
+                    return Disposable.Create(cancellation.Cancel);
                 });
         }
 
@@ -142,61 +119,62 @@ namespace Dapr.WebStreams.Client
         /// <param name="observer">
         /// The observer.
         /// </param>
-        /// <param name="dispose">
-        /// The delegate called on disposal.
+        /// <param name="cancellation">
+        /// The cancellation token source which is cancelled on error.
         /// </param>
         /// <param name="serializerSettings">
         /// The serializer Settings.
         /// </param>
-        /// <returns>
-        /// The subscription.
-        /// </returns>
-        private static IDisposable SubscribeToSocket<T>(IObservable<string> socket, IObserver<T> observer, Action dispose, JsonSerializerSettings serializerSettings)
+        private static void SubscribeToSocket<T>(
+            IObservable<string> socket,
+            IObserver<T> observer,
+            CancellationTokenSource cancellation,
+            JsonSerializerSettings serializerSettings)
         {
-            return socket.Subscribe(
-                next =>
-                {
-                    try
+            cancellation.Token.Register(
+                socket.Subscribe(
+                    next =>
                     {
-                        if (string.IsNullOrEmpty(next))
+                        try
                         {
-                            return;
-                        }
+                            if (string.IsNullOrEmpty(next) || cancellation.IsCancellationRequested)
+                            {
+                                return;
+                            }
 
-                        var type = next[0];
-                        switch (type)
-                        {
-                            case 'n':
-                                var value = JsonConvert.DeserializeObject<T>(next.Substring(1), serializerSettings);
-                                observer.OnNext(value);
-                                break;
-                            case 'e':
-                                var error = next.Substring(1);
-                                observer.OnError(new WebStreamException(error));
-                                dispose();
-                                break;
-                            case 'c':
-                                observer.OnCompleted();
-                                dispose();
-                                break;
+                            switch (next[0])
+                            {
+                                case 'n':
+                                    var value = JsonConvert.DeserializeObject<T>(next.Substring(1), serializerSettings);
+                                    observer.OnNext(value);
+                                    break;
+                                case 'e':
+                                    var error = next.Substring(1);
+                                    observer.OnError(new WebStreamException(error));
+                                    cancellation.Cancel();
+                                    break;
+                                case 'c':
+                                    observer.OnCompleted();
+                                    cancellation.Cancel();
+                                    break;
+                            }
                         }
-                    }
-                    catch (Exception e)
+                        catch (Exception e)
+                        {
+                            observer.OnError(e);
+                            cancellation.Cancel();
+                        }
+                    },
+                    error =>
                     {
-                        observer.OnError(e);
-                        dispose();
-                    }
-                },
-                error =>
-                {
-                    observer.OnError(error);
-                    dispose();
-                },
-                () =>
-                {
-                    observer.OnCompleted();
-                    dispose();
-                });
+                        observer.OnError(error);
+                        cancellation.Cancel();
+                    },
+                    () =>
+                    {
+                        observer.OnCompleted();
+                        cancellation.Cancel();
+                    }).Dispose);
         }
 
         /// <summary>
@@ -214,47 +192,39 @@ namespace Dapr.WebStreams.Client
         /// <param name="name">
         /// The name of the observable.
         /// </param>
+        /// <param name="cancellationToken">
+        /// The cancellation token.
+        /// </param>
         /// <param name="serializerSettings">
         /// The serializer Settings.
         /// </param>
-        /// <returns>
-        /// An <see cref="IDisposable"/> which unwinds the pipe when disposed.
-        /// </returns>
-        private static IDisposable PipeToObserver<T>(IObserver<string> observer, IObservable<T> observable, string name, JsonSerializerSettings serializerSettings)
+        private static void PipeToObserver<T>(
+            IObserver<string> observer,
+            IObservable<T> observable,
+            string name,
+            CancellationToken cancellationToken,
+            JsonSerializerSettings serializerSettings)
         {
-            var subscription = new IDisposable[] { null };
-            return subscription[0] = observable.Subscribe(
-                next =>
-                {
-                    try
+            cancellationToken.Register(
+                observable.Subscribe(
+                    next =>
                     {
-                        observer.OnNext('n' + name + '.' + JsonConvert.SerializeObject(next, serializerSettings));
-                    }
-                    catch (Exception e)
-                    {
-                        observer.OnNext('e' + name + '.' + e.Message);
-                        if (subscription[0] != null)
+                        if (cancellationToken.IsCancellationRequested)
                         {
-                            subscription[0].Dispose();
+                            return;
                         }
-                    }
-                },
-                error =>
-                {
-                    observer.OnNext('e' + name + '.' + error.Message);
-                    if (subscription[0] != null)
-                    {
-                        subscription[0].Dispose();
-                    }
-                },
-                () =>
-                {
-                    observer.OnNext('c' + name);
-                    if (subscription[0] != null)
-                    {
-                        subscription[0].Dispose();
-                    }
-                });
+
+                        try
+                        {
+                            observer.OnNext('n' + name + '.' + JsonConvert.SerializeObject(next, serializerSettings));
+                        }
+                        catch (Exception e)
+                        {
+                            observer.OnNext('e' + name + '.' + e.Message);
+                        }
+                    },
+                    error => observer.OnNext('e' + name + '.' + error.Message),
+                    () => observer.OnNext('c' + name)).Dispose);
         }
     }
 }

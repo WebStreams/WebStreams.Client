@@ -2,7 +2,7 @@
 <package >
   <metadata>
     <id>Dapr.WebStream.Client</id>
-    <version>0.1.12</version>
+    <version>0.1.15</version>
     <title>WebStream Client</title>
     <authors>Reuben Bond</authors>
     <owners>Dapr Labs</owners>
@@ -11,7 +11,7 @@
     <!-- <iconUrl>http://ICON_URL_HERE_OR_DELETE_THIS_LINE</iconUrl> -->
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
     <description>Cross-platform WebStream library for .NET using Reactive Extensions. Compatible with Windows, Mono/Xamarin Android and iOS</description>
-    <releaseNotes>Initial version.</releaseNotes>
+    <releaseNotes>Improve robustness and simplify code.</releaseNotes>
     <copyright>Copyright 2014</copyright>
     <tags>WebStream WebSockets Reactive Rx</tags>
     <dependencies>
