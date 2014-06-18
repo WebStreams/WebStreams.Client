@@ -7,6 +7,7 @@ namespace Dapr.WebStreams.Client
 {
     using System;
     using System.Collections.Generic;
+    using System.Reactive;
     using System.Reactive.Disposables;
     using System.Reactive.Linq;
     using System.Reactive.Threading.Tasks;
@@ -50,7 +51,7 @@ namespace Dapr.WebStreams.Client
                 {
                     var cancellation = new CancellationTokenSource();
                     var socket = WebSocket.ConnectOutput(uri, cancellation.Token).ToObservable().Merge();
-                    SubscribeToSocket(socket, observer, cancellation, serializerSettings);
+                    SubscribeLocalToRemote(socket, observer, serializerSettings);
                     return Disposable.Create(cancellation.Cancel);
                 });
         }
@@ -78,45 +79,47 @@ namespace Dapr.WebStreams.Client
         {
             serializerSettings = serializerSettings ?? DefaultSerializerSettings;
             return Observable.Create<T>(
-                observer =>
+                local =>
                 {
                     var cancellation = new CancellationTokenSource();
                     try
                     {
                         // Connect to the WebSocket and pipe all input streams into it.
-                        var socket = WebSocket.Connect(uri, cancellation.Token).ToObservable().Do(
-                            sock =>
+                        var remote = WebSocket.Connect(uri, cancellation.Token).ToObservable().Do(
+                            socket =>
                             {
                                 foreach (var input in inputStreams)
                                 {
-                                    PipeToObserver(sock, input.Value, input.Key, cancellation.Token, serializerSettings);
+                                    var subscription = SubscribeRemoteToLocal(socket, input.Value, input.Key, serializerSettings);
+                                    cancellation.Token.Register(()=>subscription.Dispose());
                                 }
                             }).Merge();
 
                         // Subscribe the socket to the observer.
-                        SubscribeToSocket(socket, observer, cancellation, serializerSettings);
+                        var remoteSubscription = SubscribeLocalToRemote(remote, local,  serializerSettings);
+                        cancellation.Token.Register(()=>remoteSubscription.Dispose());
                     }
                     catch (Exception e)
                     {
-                        observer.OnError(e);
+                        local.OnError(e);
                         cancellation.Cancel();
                     }
 
                     // Return a disposable which will unwind everything.
-                    return Disposable.Create(cancellation.Cancel);
+                    return Disposable.Create(()=>cancellation.Cancel());
                 });
         }
 
         /// <summary>
-        /// Subscribes the provided <paramref name="observer"/> to the provided <paramref name="socket"/>, returning the subscription.
+        /// Subscribes the provided <paramref name="local"/> to the provided <paramref name="remote"/>, returning the subscription.
         /// </summary>
         /// <typeparam name="T">
         /// The underlying stream type.
         /// </typeparam>
-        /// <param name="socket">
+        /// <param name="remote">
         /// The socket.
         /// </param>
-        /// <param name="observer">
+        /// <param name="local">
         /// The observer.
         /// </param>
         /// <param name="cancellation">
@@ -125,106 +128,105 @@ namespace Dapr.WebStreams.Client
         /// <param name="serializerSettings">
         /// The serializer Settings.
         /// </param>
-        private static void SubscribeToSocket<T>(
-            IObservable<string> socket,
-            IObserver<T> observer,
-            CancellationTokenSource cancellation,
+        /// <returns>
+        /// The <see cref="IDisposable"/> subscription.
+        /// </returns>
+        private static IDisposable SubscribeLocalToRemote<T>(
+            IObservable<string> remote,
+            IObserver<T> local,
             JsonSerializerSettings serializerSettings)
         {
-            cancellation.Token.Register(
-                socket.Subscribe(
-                    next =>
+            return remote.Materialize().Subscribe(
+                next =>
+                {
+                    switch (next.Kind)
                     {
-                        try
-                        {
-                            if (string.IsNullOrEmpty(next) || cancellation.IsCancellationRequested)
+                        case NotificationKind.OnNext:
+                            try
                             {
-                                return;
+                                var value = next.Value;
+                                switch (value[0])
+                                {
+                                    case 'n':
+                                        local.OnNext(JsonConvert.DeserializeObject<T>(value.Substring(1), serializerSettings));
+                                        break;
+                                    case 'e':
+                                        var error = value.Substring(1);
+                                        local.OnError(new WebStreamException(error));
+                                        break;
+                                    case 'c':
+                                        local.OnCompleted();
+                                        break;
+                                }
+                            }
+                            catch (Exception e)
+                            {
+                                local.OnError(new WebStreamException("OnNext failed.", e));
                             }
 
-                            switch (next[0])
-                            {
-                                case 'n':
-                                    var value = JsonConvert.DeserializeObject<T>(next.Substring(1), serializerSettings);
-                                    observer.OnNext(value);
-                                    break;
-                                case 'e':
-                                    var error = next.Substring(1);
-                                    observer.OnError(new WebStreamException(error));
-                                    cancellation.Cancel();
-                                    break;
-                                case 'c':
-                                    observer.OnCompleted();
-                                    cancellation.Cancel();
-                                    break;
-                            }
-                        }
-                        catch (Exception e)
-                        {
-                            observer.OnError(e);
-                            cancellation.Cancel();
-                        }
-                    },
-                    error =>
-                    {
-                        observer.OnError(error);
-                        cancellation.Cancel();
-                    },
-                    () =>
-                    {
-                        observer.OnCompleted();
-                        cancellation.Cancel();
-                    }).Dispose);
+                            break;
+                        case NotificationKind.OnError:
+                            local.OnError(next.Exception);
+                            break;
+                        case NotificationKind.OnCompleted:
+                            local.OnCompleted();
+                            break;
+                    }
+                });
         }
 
         /// <summary>
-        /// Pipes the provided <paramref name="observable"/> into the provided <paramref name="observer"/>.
+        /// Pipes the provided <paramref name="local"/> into the provided <paramref name="remote"/>.
         /// </summary>
         /// <typeparam name="T">
-        /// The type of <see cref="observable"/>.
+        /// The type of <see cref="local"/>.
         /// </typeparam>
-        /// <param name="observer">
+        /// <param name="remote">
         /// The observer.
         /// </param>
-        /// <param name="observable">
+        /// <param name="local">
         /// The observable.
         /// </param>
         /// <param name="name">
         /// The name of the observable.
         /// </param>
-        /// <param name="cancellationToken">
-        /// The cancellation token.
-        /// </param>
         /// <param name="serializerSettings">
         /// The serializer Settings.
         /// </param>
-        private static void PipeToObserver<T>(
-            IObserver<string> observer,
-            IObservable<T> observable,
+        /// <returns>
+        /// The <see cref="IDisposable"/> subscription.
+        /// </returns>
+        private static IDisposable SubscribeRemoteToLocal<T>(
+            IObserver<string> remote,
+            IObservable<T> local,
             string name,
-            CancellationToken cancellationToken,
             JsonSerializerSettings serializerSettings)
         {
-            cancellationToken.Register(
-                observable.Subscribe(
-                    next =>
+            return local.Materialize().Subscribe(
+                next =>
+                {
+                    switch (next.Kind)
                     {
-                        if (cancellationToken.IsCancellationRequested)
-                        {
-                            return;
-                        }
+                        case NotificationKind.OnCompleted:
+                            remote.OnNext('c' + name);
+                            break;
+                        case NotificationKind.OnError:
+                            remote.OnNext('e' + name + '.' + next.Exception.Message);
+                            break;
+                        case NotificationKind.OnNext:
+                            try
+                            {
+                                var msg = 'n' + name + '.' + JsonConvert.SerializeObject(next.Value, serializerSettings);
+                                remote.OnNext(msg);
+                            }
+                            catch (Exception e)
+                            {
+                                remote.OnNext('e' + name + '.' + e.Message);
+                            }
 
-                        try
-                        {
-                            observer.OnNext('n' + name + '.' + JsonConvert.SerializeObject(next, serializerSettings));
-                        }
-                        catch (Exception e)
-                        {
-                            observer.OnNext('e' + name + '.' + e.Message);
-                        }
-                    },
-                    error => observer.OnNext('e' + name + '.' + error.Message),
-                    () => observer.OnNext('c' + name)).Dispose);
+                            break;
+                    }
+                });
         }
     }
 }
