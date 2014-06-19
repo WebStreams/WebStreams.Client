@@ -16,7 +16,7 @@
     <tags>WebStream WebSockets Reactive Rx</tags>
     <dependencies>
       <group>
-        <dependency id="Dapr.WebSockets" version="0.1.14" />
+        <dependency id="Dapr.WebSockets" version="0.1.20" />
       </group>
     </dependencies>
   </metadata>
