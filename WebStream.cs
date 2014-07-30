@@ -7,11 +7,12 @@ namespace Dapr.WebStreams.Client
 {
     using System;
     using System.Collections.Generic;
-    using System.Reactive;
+    using System.Diagnostics;
+    using System.Reactive.Concurrency;
     using System.Reactive.Disposables;
     using System.Reactive.Linq;
-    using System.Reactive.Threading.Tasks;
     using System.Threading;
+    using System.Threading.Tasks;
 
     using Dapr.WebSockets;
 
@@ -22,40 +23,6 @@ namespace Dapr.WebStreams.Client
     /// </summary>
     public static class WebStream
     {
-        /// <summary>
-        /// Gets or sets the default serializer settings.
-        /// </summary>
-        public static JsonSerializerSettings DefaultSerializerSettings { get; set; }
-
-        /// <summary>
-        /// Connects to the WebSocket specified by <see cref="uri"/> and returns an observable collection of objects
-        /// from the endpoint.
-        /// </summary>
-        /// <param name="uri">
-        /// The URI.
-        /// </param>
-        /// <param name="serializerSettings">
-        /// The serializer settings.
-        /// </param>
-        /// <typeparam name="T">
-        /// The underlying type returned by the endpoint.
-        /// </typeparam>
-        /// <returns>
-        /// An observable collection of objects from the endpoint.
-        /// </returns>
-        public static IObservable<T> Create<T>(Uri uri, JsonSerializerSettings serializerSettings = null)
-        {
-            serializerSettings = serializerSettings ?? DefaultSerializerSettings;
-            return Observable.Create<T>(
-                observer =>
-                {
-                    var cancellation = new CancellationTokenSource();
-                    var socket = WebSocket.ConnectOutput(uri, cancellation.Token).ToObservable().Merge();
-                    SubscribeLocalToRemote(socket, observer, serializerSettings);
-                    return Disposable.Create(cancellation.Cancel);
-                });
-        }
-
         /// <summary>
         /// Connects to the WebSocket specified by <see cref="uri"/>, piping in all provided observables, and
         /// returning an observable collection of objects from the endpoint.
@@ -69,164 +36,206 @@ namespace Dapr.WebStreams.Client
         /// <param name="serializerSettings">
         /// The serializer Settings.
         /// </param>
+        /// <param name="scheduler">The scheduler.</param>
         /// <typeparam name="T">
         /// The underlying type returned by the endpoint.
         /// </typeparam>
         /// <returns>
         /// An observable collection of objects from the endpoint.
         /// </returns>
-        public static IObservable<T> Create<T>(Uri uri, IDictionary<string, IObservable<object>> inputStreams, JsonSerializerSettings serializerSettings = null)
+        public static IObservable<T> Create<T>(
+            Uri uri,
+            IDictionary<string, IObservable<object>> inputStreams = null,
+            JsonSerializerSettings serializerSettings = null,
+            IScheduler scheduler = null)
         {
-            serializerSettings = serializerSettings ?? DefaultSerializerSettings;
+            serializerSettings = serializerSettings ?? JsonConvert.DefaultSettings();
+            scheduler = scheduler ?? new TaskPoolScheduler(Task.Factory);
             return Observable.Create<T>(
-                local =>
+                incoming =>
                 {
                     var cancellation = new CancellationTokenSource();
+                    var exception = default(Exception);
                     try
                     {
                         // Connect to the WebSocket and pipe all input streams into it.
-                        var remote = WebSocket.Connect(uri, cancellation.Token).ToObservable().Do(
-                            socket =>
+                        Action<string> onNext = next =>
+                        {
+                            if (cancellation.IsCancellationRequested)
                             {
-                                foreach (var input in inputStreams)
-                                {
-                                    var subscription = SubscribeRemoteToLocal(socket, input.Value, input.Key, serializerSettings);
-                                    cancellation.Token.Register(()=>subscription.Dispose());
-                                }
-                            }).Merge();
+                                throw new OperationCanceledException("Cancellation requested.");
+                            }
 
-                        // Subscribe the socket to the observer.
-                        var remoteSubscription = SubscribeLocalToRemote(remote, local,  serializerSettings);
-                        cancellation.Token.Register(()=>remoteSubscription.Dispose());
+                            try
+                            {
+                                if (string.IsNullOrWhiteSpace(next))
+                                {
+                                    return;
+                                }
+
+                                switch (next[0])
+                                {
+                                    case ResponseKind.Next:
+                                        incoming.OnNext(JsonConvert.DeserializeObject<T>(next.Substring(1), serializerSettings));
+                                        break;
+                                    case ResponseKind.Error:
+                                        var error = next.Substring(1);
+                                        exception = new WebStreamException(error);
+                                        cancellation.Cancel();
+                                        break;
+                                    case ResponseKind.Completed:
+                                        cancellation.Cancel();
+                                        break;
+                                }
+                            }
+                            catch (Exception e)
+                            {
+                                exception = new WebStreamException("OnNext failed.", e);
+                                cancellation.Cancel();
+                            }
+                        };
+                        Action<Exception> onError = e =>
+                        {
+                            if (cancellation.IsCancellationRequested)
+                            {
+                                throw new OperationCanceledException("Cancellation requested.");
+                            }
+
+                            exception = e;
+                            cancellation.Cancel();
+                        };
+                        Action onClosed = () =>
+                        {
+                            if (cancellation.IsCancellationRequested)
+                            {
+                                throw new OperationCanceledException("Cancellation requested.");
+                            }
+
+                            cancellation.Cancel();
+                        };
+
+                        var socket = WebSocket.Connect(uri, cancellation.Token);
+                        var incomingSubscription = socket.Subscribe(onNext, onError, onClosed);
+
+                        cancellation.Token.Register(
+                            () =>
+                            {
+                                // If we didn't cancel with an error, complete the incoming messages stream.
+                                if (exception == null)
+                                {
+                                    if (cancellation.IsCancellationRequested)
+                                    {
+                                        incoming.OnError(new OperationCanceledException("Cancellation requested."));
+                                    }
+                                    else
+                                    {
+                                        incoming.OnCompleted();
+                                    }
+                                }
+                                else
+                                {
+                                    incoming.OnError(exception);
+                                }
+
+                                incomingSubscription.Dispose();
+                            });
+
+                        // Connect to the socket and subscribe to the 'outgoing' observable while the connection remains opened.
+                        SerializeOutgoingMessages(inputStreams, socket, serializerSettings, cancellation.Token, scheduler);
                     }
                     catch (Exception e)
                     {
-                        local.OnError(e);
+                        exception = e;
                         cancellation.Cancel();
+                        throw;
                     }
 
                     // Return a disposable which will unwind everything.
-                    return Disposable.Create(()=>cancellation.Cancel());
-                });
+                    return Disposable.Create(cancellation.Cancel);
+                }).ObserveOn(scheduler).SubscribeOn(scheduler);
         }
 
         /// <summary>
-        /// Subscribes the provided <paramref name="local"/> to the provided <paramref name="remote"/>, returning the subscription.
+        /// Serializes outgoing messages.
         /// </summary>
-        /// <typeparam name="T">
-        /// The underlying stream type.
-        /// </typeparam>
-        /// <param name="remote">
-        /// The socket.
+        /// <param name="inputStreams">
+        /// The input streams.
         /// </param>
-        /// <param name="local">
-        /// The observer.
-        /// </param>
-        /// <param name="cancellation">
-        /// The cancellation token source which is cancelled on error.
+        /// <param name="outgoing">
+        /// The outgoing stream.
         /// </param>
         /// <param name="serializerSettings">
-        /// The serializer Settings.
+        /// The serializer settings.
         /// </param>
-        /// <returns>
-        /// The <see cref="IDisposable"/> subscription.
-        /// </returns>
-        private static IDisposable SubscribeLocalToRemote<T>(
-            IObservable<string> remote,
-            IObserver<T> local,
-            JsonSerializerSettings serializerSettings)
+        /// <param name="cancellationToken">
+        /// The cancellation token.
+        /// </param>
+        /// <param name="scheduler">
+        /// The scheduler.
+        /// </param>
+        /// <exception cref="OperationCanceledException">
+        /// Cancellation was requested.
+        /// </exception>
+        private static void SerializeOutgoingMessages(
+            IEnumerable<KeyValuePair<string, IObservable<object>>> inputStreams,
+            IObserver<string> outgoing,
+            JsonSerializerSettings serializerSettings,
+            CancellationToken cancellationToken,
+            IScheduler scheduler)
         {
-            return remote.Materialize().Subscribe(
-                next =>
-                {
-                    switch (next.Kind)
+            if (inputStreams == null)
+            {
+                return;
+            }
+
+            foreach (var input in inputStreams)
+            {
+                var name = input.Key;
+                var values = input.Value.ObserveOn(scheduler).SubscribeOn(scheduler);
+
+                var subscription = values.Subscribe(
+                    next =>
                     {
-                        case NotificationKind.OnNext:
-                            try
-                            {
-                                var value = next.Value;
-                                switch (value[0])
-                                {
-                                    case 'n':
-                                        local.OnNext(JsonConvert.DeserializeObject<T>(value.Substring(1), serializerSettings));
-                                        break;
-                                    case 'e':
-                                        var error = value.Substring(1);
-                                        local.OnError(new WebStreamException(error));
-                                        break;
-                                    case 'c':
-                                        local.OnCompleted();
-                                        break;
-                                }
-                            }
-                            catch (Exception e)
-                            {
-                                local.OnError(new WebStreamException("OnNext failed.", e));
-                            }
+                        if (cancellationToken.IsCancellationRequested)
+                        {
+                            throw new OperationCanceledException("Cancellation requested.");
+                        }
 
-                            break;
-                        case NotificationKind.OnError:
-                            local.OnError(next.Exception);
-                            break;
-                        case NotificationKind.OnCompleted:
-                            local.OnCompleted();
-                            break;
-                    }
-                });
-        }
-
-        /// <summary>
-        /// Pipes the provided <paramref name="local"/> into the provided <paramref name="remote"/>.
-        /// </summary>
-        /// <typeparam name="T">
-        /// The type of <see cref="local"/>.
-        /// </typeparam>
-        /// <param name="remote">
-        /// The observer.
-        /// </param>
-        /// <param name="local">
-        /// The observable.
-        /// </param>
-        /// <param name="name">
-        /// The name of the observable.
-        /// </param>
-        /// <param name="serializerSettings">
-        /// The serializer Settings.
-        /// </param>
-        /// <returns>
-        /// The <see cref="IDisposable"/> subscription.
-        /// </returns>
-        private static IDisposable SubscribeRemoteToLocal<T>(
-            IObserver<string> remote,
-            IObservable<T> local,
-            string name,
-            JsonSerializerSettings serializerSettings)
-        {
-            return local.Materialize().Subscribe(
-                next =>
-                {
-                    switch (next.Kind)
+                        try
+                        {
+                            var msg = ResponseKind.Next + name + '.' + JsonConvert.SerializeObject(next, serializerSettings);
+                            outgoing.OnNext(msg);
+                        }
+                        catch (Exception e)
+                        {
+                            outgoing.OnNext(ResponseKind.Error + name + '.' + e.Message);
+                        }
+                    },
+                    exception =>
                     {
-                        case NotificationKind.OnCompleted:
-                            remote.OnNext('c' + name);
-                            break;
-                        case NotificationKind.OnError:
-                            remote.OnNext('e' + name + '.' + next.Exception.Message);
-                            break;
-                        case NotificationKind.OnNext:
-                            try
-                            {
-                                var msg = 'n' + name + '.' + JsonConvert.SerializeObject(next.Value, serializerSettings);
-                                remote.OnNext(msg);
-                            }
-                            catch (Exception e)
-                            {
-                                remote.OnNext('e' + name + '.' + e.Message);
-                            }
+                        if (cancellationToken.IsCancellationRequested)
+                        {
+                            throw new OperationCanceledException("Cancellation requested.");
+                        }
 
-                            break;
-                    }
-                });
+                        outgoing.OnNext(ResponseKind.Error + name + '.' + exception.Message);
+                    },
+                    () =>
+                    {
+                        if (cancellationToken.IsCancellationRequested)
+                        {
+                            throw new OperationCanceledException("Cancellation requested.");
+                        }
+
+                        outgoing.OnNext(ResponseKind.Completed + name);
+                    });
+                cancellationToken.Register(
+                    () =>
+                    {
+                        Debug.WriteLine("inputstream " + name + " cancellation called");
+                        subscription.Dispose();
+                    });
+            }
         }
     }
 }
