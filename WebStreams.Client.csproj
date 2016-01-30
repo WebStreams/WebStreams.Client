@@ -8,8 +8,8 @@
     <ProjectGuid>{36178528-3C1D-498A-B1AE-F9160C37800A}</ProjectGuid>
     <OutputType>Library</OutputType>
     <AppDesignerFolder>Properties</AppDesignerFolder>
-    <RootNamespace>Dapr.WebStreams.Client</RootNamespace>
-    <AssemblyName>Dapr.WebStreams.Client</AssemblyName>
+    <RootNamespace>WebStreams.Client</RootNamespace>
+    <AssemblyName>WebStreams.Client</AssemblyName>
     <DefaultLanguage>en-US</DefaultLanguage>
     <FileAlignment>512</FileAlignment>
     <ProjectTypeGuids>{786C830F-07A1-408B-BD7F-6EE04809D6DB};{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}</ProjectTypeGuids>
@@ -32,7 +32,7 @@
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
     <DebugType>pdbonly</DebugType>
     <Optimize>true</Optimize>
-    <OutputPath>bin\Release\</OutputPath>
+    <OutputPath>lib\Portable-Net45+Win8+WP8+WPA81+MonoAndroid+MonoTouch\</OutputPath>
     <DefineConstants>TRACE</DefineConstants>
     <ErrorReport>prompt</ErrorReport>
     <WarningLevel>4</WarningLevel>
@@ -66,7 +66,8 @@
   <ItemGroup>
     <None Include="app.config" />
     <None Include="packages.config" />
-    <None Include="WebStream.Client.nuspec">
+    <None Include="README.md" />
+    <None Include="WebStreams.Client.nuspec">
       <SubType>Designer</SubType>
     </None>
   </ItemGroup>

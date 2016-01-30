@@ -3,7 +3,7 @@
 // </summary>
 // --------------------------------------------------------------------------------------------------------------------
 
-namespace Dapr.WebStreams.Client
+namespace WebStreams.Client
 {
     using System;
 

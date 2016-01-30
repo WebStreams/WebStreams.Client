@@ -3,7 +3,7 @@
 // </summary>
 // --------------------------------------------------------------------------------------------------------------------
 
-namespace Dapr.WebStreams.Client
+namespace WebStreams.Client
 {
     using System;
     using System.Collections.Generic;
@@ -84,6 +84,10 @@ namespace Dapr.WebStreams.Client
                                         cancellation.Cancel();
                                         break;
                                     case ResponseKind.Completed:
+                                        cancellation.Cancel();
+                                        break;
+                                    case ResponseKind.Final:
+                                        incoming.OnNext(JsonConvert.DeserializeObject<T>(next.Substring(1), serializerSettings));
                                         cancellation.Cancel();
                                         break;
                                 }

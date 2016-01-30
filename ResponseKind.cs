@@ -4,7 +4,7 @@
 // </summary>
 // --------------------------------------------------------------------------------------------------------------------
 
-namespace Dapr.WebStreams.Client
+namespace WebStreams.Client
 {
     /// <summary>
     /// The valid response kinds.
@@ -25,5 +25,10 @@ namespace Dapr.WebStreams.Client
         /// The OnCompleted response kind.
         /// </summary>
         public const char Completed = 'c';
+
+        /// <summary>
+        /// The Final response kind, which represents OnNext followed immediately by OnCompleted.
+        /// </summary>
+        public const char Final = 'f';
     }
 }
